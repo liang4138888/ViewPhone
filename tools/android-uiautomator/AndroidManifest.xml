@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="cn.viewphone.axprobe">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="31" />
+    <application
+        android:label="ViewPhone 界面读取"
+        android:allowBackup="false"
+        android:debuggable="true"
+        android:usesCleartextTraffic="false">
+        <service
+            android:name=".AXProbe"
+            android:exported="true"
+            android:label="ViewPhone 界面读取"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+        <receiver android:name=".DumpReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="cn.viewphone.axprobe.DUMP" />
+                <action android:name="cn.viewphone.axprobe.SET_TEXT" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

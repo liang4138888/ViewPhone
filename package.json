@@ -1,0 +1,35 @@
+{
+  "name": "viewphone",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A local, browser-based device lab for controlling iOS, Android, and HarmonyOS phones.",
+  "scripts": {
+    "dev": "NODE_ENV=development node --import=tsx scripts/dev.ts",
+    "build": "vite build",
+    "start": "NODE_ENV=production node server/index.js",
+    "test": "node --import=tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "express": "^5.1.0",
+    "mysql2": "^3.24.6",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.3.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3"
+  }
+}

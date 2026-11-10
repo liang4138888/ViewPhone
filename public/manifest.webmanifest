@@ -1,0 +1,9 @@
+{
+  "name": "ViewPhone 手机镜像工作台",
+  "short_name": "ViewPhone",
+  "description": "在浏览器中查看并控制 USB 连接的手机",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f7f2",
+  "theme_color": "#f4f7f2"
+}
