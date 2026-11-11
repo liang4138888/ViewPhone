@@ -122,6 +122,7 @@ export function DevicePanel({
         loading={!frame.url && !frame.error && device?.state === 'device'}
         paused={!interactive}
         error={frame.error || detail}
+        streamError={frame.error}
         latency={frame.latencyMs}
         interactive={Boolean(interactive && device?.state === 'device')}
         computerControlsEnabled={computerControlsEnabled}

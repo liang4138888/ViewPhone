@@ -136,7 +136,9 @@ export async function discoverIos() {
         warning: 'WebDriverAgent 正在启动，尚未就绪',
       };
     }
-    const [width, height] = await readWindowSize().catch(() => [undefined, undefined]);
+    // readWindowSize() resolves an object; destructuring it as an array made
+    // every discovery run fail with "is not iterable" once WDA was reachable.
+    const { width, height } = await readWindowSize().catch(() => ({}));
     return {
       devices: [
         {

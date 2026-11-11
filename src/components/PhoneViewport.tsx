@@ -20,6 +20,7 @@ type Props = {
   loading: boolean;
   paused: boolean;
   error?: string;
+  streamError?: string;
   latency?: number;
   interactive: boolean;
   computerControlsEnabled: boolean;
@@ -50,6 +51,7 @@ export function PhoneViewport({
   loading,
   paused,
   error,
+  streamError,
   latency,
   interactive,
   computerControlsEnabled,
@@ -299,8 +301,10 @@ export function PhoneViewport({
                 <div className="screen-activity"><span /></div>
               )}
               {frameUrl && paused && <div className="paused-cover"><Icon name="lock" />画面已暂停</div>}
-              {frameUrl && error && (
-                <div className="stream-warning" title={error}>画面更新失败 · {error}</div>
+              {frameUrl && streamError && (
+                <div className="stream-warning" title={streamError}>
+                  画面更新失败 · {streamError}
+                </div>
               )}
             </div>
           </div>
