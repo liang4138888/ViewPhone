@@ -73,11 +73,36 @@ ViewPhone 使用 HDC 的 `uitest uiInput` 系统测试接口；部分企业定�
 
 iOS 不能像 Android 一样直接通过 USB 截屏控制，必须使用已签名的 [WebDriverAgent](https://github.com/appium/WebDriverAgent)。这是 Apple 对第三方设备的系统限制，不需要在手机上安装 ViewPhone App，但需要 WDA 在本机运行。
 
-当前机器只安装了 Command Line Tools；在 macOS 上要启用 WDA，需要从 App Store 安装完整 Xcode，按 WDA 文档配置开发团队并编译到设备。启动 WDA 后设置：
+准备工作（一次即可）：
+
+1. 安装完整 Xcode（App Store），运行一次 `sudo xcodebuild -license accept`。
+2. 用 Apple ID 登录 Xcode → Settings → Accounts，生成免费个人团队（证书 7 天有效，过期重新构建即可）。
+3. 拉取 WDA 源码：`git clone https://github.com/appium/WebDriverAgent.git ~/wda/WebDriverAgent`。
+4. 安装端口映射工具：`brew install libimobiledevice`。
+5. 在 `.env.local` 里填写（示例见 `.env.example`）：
 
 ```dotenv
 WDA_URL=http://127.0.0.1:8100
+WDA_DEVICE_UDID=00008130-0005641A2632001C   # 只插一台时可不填，自动检测
+WDA_DEVELOPMENT_TEAM=XXXXXXXXXX             # Xcode 个人团队 ID
+WDA_BUNDLE_ID=com.yourname.viewphone.wda    # 必须全局唯一
+VIEWPHONE_WDA_PROJECT=/Users/you/wda/WebDriverAgent
 ```
+
+启动与保活：
+
+```bash
+scripts/start-ios-wda.sh start              # 构建（首次）+ 启动 WDA + iproxy，等到 /status 就绪
+scripts/start-ios-wda.sh status             # 健康状态、pid、最近日志
+scripts/start-ios-wda.sh restart            # WDA 会话被系统回收后用它重拉
+scripts/start-ios-wda.sh stop               # 停止 WDA 与端口映射
+
+# 可选：登录自启 + 崩溃自动重拉（launchd），日志在 .artifacts/wda/launchd.out.log
+scripts/start-ios-wda.sh install-launchd
+scripts/start-ios-wda.sh uninstall-launchd
+```
+
+失败时的排查顺序：手机解锁并保持亮屏 → 手机上「设置 → 通用 → VPN与设备管理」信任开发者证书 → 免费团队证书 7 天过期用 `WDA_FORCE_BUILD=1 scripts/start-ios-wda.sh restart` 重新签名。脚本会把原因打印出来，不会把失败当成成功。
 
 如果已经有 WDA 会话，可选配置 `WDA_SESSION_ID` 复用。ViewPhone 会把截图尺寸与 iOS 逻辑触控尺寸分开处理，避免 Retina 截图造成点击偏移。
 

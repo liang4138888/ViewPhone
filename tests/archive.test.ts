@@ -158,6 +158,65 @@ test('share is reusable before expiry and only exposes its own rewritten screens
   assert.equal(await getSharedRun('x'.repeat(32)), undefined);
 });
 
+test('a shared page comparison keeps pairing but hides device control ids', async () => {
+  const comparisonRunId = '56789012-5678-4567-8567-567890123456';
+  const controlIds = ['i_wda', 'h_MkxRMDIyM0EyNjAwMTMxMg'];
+  const panel = (id: string, index: number) => ({
+    id,
+    name: id === controlIds[0] ? 'iPhone' : 'HarmonyOS',
+    platform: id === controlIds[0] ? 'ios' : 'harmony',
+    imageUrl: `/api/test-runs/${comparisonRunId}/assets/comparison-device-${index}.png`,
+  });
+  const source = panel(controlIds[0], 1);
+  const target = panel(controlIds[1], 2);
+  const comparison = {
+    id: comparisonRunId,
+    recordType: 'comparison',
+    trigger: 'checkpoint',
+    checkpointName: '双端首页对比',
+    source,
+    devices: [source, target],
+    pairs: [{ status: 'compared', source, target, differences: [] }],
+    targets: [{ status: 'compared', target, differences: [] }],
+    overview: {
+      imageUrl: `/api/test-runs/${comparisonRunId}/assets/comparison-overview.jpg`,
+      width: 1_508,
+      height: 1_600,
+      devices: [
+        { ...source, x: 0, y: 0, width: 489, height: 1_000 },
+        { ...target, x: 499, y: 0, width: 492, height: 1_000 },
+      ],
+    },
+    progress: { analyzed: 1, total: 1 },
+  };
+  await archiveTestRun({
+    id: comparisonRunId,
+    recordType: 'comparison',
+    deviceName: '2 台设备',
+    platform: 'ios',
+    status: 'completed',
+    engine: 'vision',
+    flow: '双端首页对比',
+    createdAt: new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    comparison,
+    steps: [],
+  });
+
+  const share = await shareArchivedRun(comparisonRunId);
+  const shared = await getSharedRun(share.token);
+  const payload = JSON.stringify(shared);
+  for (const controlId of controlIds) {
+    assert.equal(payload.includes(controlId), false, `share still exposed ${controlId}`);
+  }
+  const pairs = shared?.comparison?.pairs ?? [];
+  const overviewDevices = shared?.comparison?.overview?.devices ?? [];
+  assert.equal(pairs.length, 1);
+  // The report UI matches a pair target to its overview panel by id.
+  assert.ok(overviewDevices.some((device) => device.id === pairs[0].target.id));
+  assert.ok(String(pairs[0].target.id).startsWith('device-'));
+});
+
 test('expired share tokens cannot reopen an archive', async () => {
   const share = await shareArchivedRun(runId);
   const file = join(archiveRoot, 'runs', `${runId}.json`);

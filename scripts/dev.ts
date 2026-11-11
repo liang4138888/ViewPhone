@@ -11,7 +11,10 @@ const vite = await createServer({
     host: '127.0.0.1',
     port: clientPort,
     proxy: {
-      '/api': `http://127.0.0.1:${apiPort}`,
+      // Keep the browser's Host header: share links are built from the
+      // request host, and rewriting it to the API port produced URLs that
+      // 404 in dev (the API server has no /share route).
+      '/api': { target: `http://127.0.0.1:${apiPort}`, changeOrigin: false },
     },
   },
 });

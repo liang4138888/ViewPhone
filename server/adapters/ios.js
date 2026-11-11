@@ -1,5 +1,5 @@
 import { config } from '../config.js';
-import { httpJson } from '../utils/http.js';
+import { HttpError, httpJson } from '../utils/http.js';
 import { imageDimensions } from '../utils/image.js';
 import { parseIosLayout } from '../services/uiLayout.js';
 import { DeviceAdapter } from './base.js';
@@ -41,13 +41,37 @@ function sendSessionRequest(sessionId, path, options) {
   return httpJson(`${base}/${encodeURIComponent(sessionId)}${path}`, options);
 }
 
+function wdaErrorText(error) {
+  const body = error?.body;
+  const value = body && typeof body === 'object' ? body.value : body;
+  if (!value) return '';
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+/** WDA answers 404 both for a dead session and for a route it does not have. */
+function isInvalidSession(error) {
+  return /invalid session id|session does not exist|session is not created/i.test(wdaErrorText(error));
+}
+
 async function wda(path, { method = 'GET', body, timeoutMs = 15_000 } = {}) {
   const options = { method, body, timeoutMs };
   const sessionId = await getSessionId();
   try {
     return await sendSessionRequest(sessionId, path, options);
   } catch (error) {
-    if (!config.wdaSessionId && (error.status === 404 || error.status === 410)) {
+    const missingRoute = (error.status === 404 || error.status === 410) && !isInvalidSession(error);
+    if (missingRoute && (error instanceof HttpError || error.code)) {
+      // Retrying with a fresh session cannot fix an endpoint this WDA build
+      // does not implement, so report it instead of hiding it behind a 404.
+      const detail = wdaErrorText(error);
+      if (/unhandled endpoint|unknown command/i.test(detail)) {
+        throw Object.assign(
+          new Error(`WebDriverAgent 不支持该操作端点：${path.split('?')[0]}`),
+          { statusCode: 409, code: 'WDA_ENDPOINT_UNSUPPORTED' },
+        );
+      }
+    }
+    if (!config.wdaSessionId && (error.status === 404 || error.status === 410) && isInvalidSession(error)) {
       sharedSessionId = '';
       const renewedSessionId = await getSessionId();
       return sendSessionRequest(renewedSessionId, path, options);
@@ -77,7 +101,8 @@ export class IosAdapter extends DeviceAdapter {
 
   async performUnlocked(action) {
     if (action.type === 'tap') {
-      await wda('/wda/tap/0', { method: 'POST', body: { x: action.x, y: action.y } });
+      // WDA removed the indexed /wda/tap/0 route; /wda/tap takes absolute points.
+      await wda('/wda/tap', { method: 'POST', body: { x: action.x, y: action.y } });
     } else if (action.type === 'longPress') {
       await wda('/wda/touchAndHold', {
         method: 'POST',
@@ -101,19 +126,48 @@ export class IosAdapter extends DeviceAdapter {
         body: { value: [...action.text] },
       });
     } else if (action.type === 'key') {
-      const mapping = {
-        back: 'back',
-        home: 'home',
-        recents: 'appswitch',
-        volumeUp: 'volumeUp',
-        volumeDown: 'volumeDown',
-        power: 'lock',
-      };
-      await wda('/wda/pressButton', {
-        method: 'POST',
-        body: { name: mapping[action.key] ?? action.key },
-      });
+      await this.pressKey(action.key);
     }
+  }
+
+  /**
+   * WDA's pressButton only accepts a few names; asking for anything else makes
+   * it reply HTTP 500. iOS also has no hardware back or app-switch key, so map
+   * those to what the system actually does.
+   */
+  async pressKey(key) {
+    if (key === 'back') {
+      const { width, height } = this.inputSize();
+      const middle = Math.round(height / 2);
+      await wda('/wda/dragfromtoforduration', {
+        method: 'POST',
+        body: {
+          fromX: 1,
+          fromY: middle,
+          toX: Math.round(width * 0.45),
+          toY: middle,
+          duration: 0.2,
+        },
+      });
+      return;
+    }
+    if (key === 'power') {
+      await wda('/wda/lock', { method: 'POST', body: {} });
+      return;
+    }
+    const buttons = { home: 'home', volumeUp: 'volumeUp', volumeDown: 'volumeDown' };
+    const name = buttons[key];
+    if (!name) {
+      throw Object.assign(
+        new Error(
+          key === 'recents'
+            ? 'iOS 没有最近任务键，请用 Home 键回到主屏幕'
+            : `iOS 不支持按键：${key}`,
+        ),
+        { statusCode: 422, code: 'IOS_KEY_UNSUPPORTED' },
+      );
+    }
+    await wda('/wda/pressButton', { method: 'POST', body: { name } });
   }
 
   async captureLayout() {

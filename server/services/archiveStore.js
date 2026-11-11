@@ -452,8 +452,17 @@ function summaryFromRun(run, storage) {
 }
 
 function comparisonForShare(comparison, token) {
+  // Read-only links must not carry device control ids, but the report still
+  // needs a stable handle to match a pair with its overview panel.
+  const aliases = new Map();
+  const shareDeviceId = (id) => {
+    if (!id) return id;
+    if (!aliases.has(id)) aliases.set(id, `device-${aliases.size + 1}`);
+    return aliases.get(id);
+  };
   const rewriteDevice = (device) => ({
     ...device,
+    id: shareDeviceId(device.id),
     imageUrl: shareAssetUrl(token, device.imageUrl, 'comparison-overview.png'),
   });
   return {
