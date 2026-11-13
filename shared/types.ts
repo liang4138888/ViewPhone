@@ -305,6 +305,24 @@ export type TestQuality = {
   issues: TestIssue[];
 };
 
+export type TestExplorationPage = {
+  key: string;
+  title: string;
+  /** Actions executed while this page was current. */
+  actions: number;
+  /** Click / long-press / input executed on this page. */
+  interactions: number;
+};
+
+/** What one exploration run actually reached, separate from the verdict. */
+export type TestExploration = {
+  pageCount: number;
+  interactionCount: number;
+  scrollCount: number;
+  actionCount: number;
+  pages: TestExplorationPage[];
+};
+
 export type TestStepResult = TestFlowStep & {
   status: 'pending' | 'running' | 'passed' | 'failed' | 'skipped';
   stage: TestStepStage;
@@ -319,6 +337,9 @@ export type TestStepResult = TestFlowStep & {
   imageDiff?: TestImageDiff;
   elementDiff?: TestElementDiff;
   snapshot?: { width: number; height: number; nodeCount: number };
+  /** Page the action was decided on, so the report can show coverage. */
+  pageKey?: string;
+  pageTitle?: string;
   error?: string;
   /** Independent check of what this action was supposed to produce. */
   audit?: TestStepAudit;
@@ -343,13 +364,15 @@ export type TestRun = {
   finishedAt?: string;
   error?: string;
   steps: TestStepResult[];
-  termination?: 'finished' | 'max_steps';
+  termination?: 'finished' | 'max_steps' | 'stopped';
   verdict?: {
     passed: boolean;
     reason: string;
   };
   /** Tester-style findings are separate from whether the overall task finished. */
   quality?: TestQuality;
+  /** Pages and interactions reached during a vision-driven run. */
+  exploration?: TestExploration;
   archivedAt?: string;
   updatedAt?: string;
   archiveStorage?: 'mysql' | 'file';

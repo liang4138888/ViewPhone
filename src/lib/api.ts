@@ -176,6 +176,13 @@ export async function fetchTestRun(runId: string): Promise<TestRun> {
   return parseResponse<TestRun>(response);
 }
 
+export async function stopTestRun(runId: string): Promise<{ stopped: boolean; status: TestRun['status'] }> {
+  const response = await fetch(`/api/test-runs/${encodeURIComponent(runId)}/stop`, {
+    method: 'POST',
+  });
+  return parseResponse<{ stopped: boolean; status: TestRun['status'] }>(response);
+}
+
 export async function fetchArchives(
   query = '',
   options: { category?: string; status?: 'active' | TestRun['status'] | '' } = {},

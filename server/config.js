@@ -47,7 +47,7 @@ export const config = {
   wdaUrl: (process.env.WDA_URL || 'http://127.0.0.1:8100').replace(/\/$/, ''),
   wdaSessionId: process.env.WDA_SESSION_ID || '',
   frameIntervalMs: Math.max(250, Number(process.env.CLIENT_FRAME_INTERVAL_MS || 450)),
-  visionMaxSteps: Math.max(1, Math.min(100, Number(process.env.VISION_MAX_STEPS || 30))),
+  visionMaxSteps: Math.max(1, Math.min(100, Number(process.env.VISION_MAX_STEPS || 60))),
   visionHistoryRounds: Math.max(1, Math.min(20, Number(process.env.VISION_HISTORY_ROUNDS || 5))),
   archive: {
     root: process.env.VIEWPHONE_ARCHIVE_ROOT || '',

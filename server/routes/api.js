@@ -23,6 +23,7 @@ import {
   getTestRun,
   parseTestFlow,
   placeholderSteps,
+  requestTestRunStop,
   testRunAssetPath,
 } from '../services/testFlow.js';
 import {
@@ -426,6 +427,14 @@ api.post('/archives/:runId/share', async (request, response, next) => {
       ...share,
       url: `${request.protocol}://${request.get('host')}${share.path}`,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+api.post('/test-runs/:runId/stop', async (request, response, next) => {
+  try {
+    response.json(requestTestRunStop(request.params.runId));
   } catch (error) {
     next(error);
   }

@@ -1,14 +1,46 @@
 import { composeVisionComparison } from './visionComparison.js';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
+// Shared model routers drop connections now and then (stale keep-alive
+// sockets, brief network blips, upstream 5xx). A single dropped connection
+// used to abort a whole multi-step vision run with the opaque "fetch failed".
+const DEFAULT_REQUEST_RETRY_DELAYS_MS = [800, 2_000];
+const MAX_REQUEST_RETRIES = 5;
+const MAX_REQUEST_RETRY_DELAY_MS = 30_000;
+const NETWORK_FAILURE_LABELS = {
+  ECONNRESET: 'ECONNRESET，连接被重置',
+  ECONNREFUSED: 'ECONNREFUSED，无法建立连接',
+  ETIMEDOUT: 'ETIMEDOUT，连接超时',
+  ENOTFOUND: 'ENOTFOUND，域名解析失败',
+  EAI_AGAIN: 'EAI_AGAIN，域名解析超时',
+  EPIPE: 'EPIPE，连接已断开',
+  UND_ERR_SOCKET: 'UND_ERR_SOCKET，连接已断开',
+  UND_ERR_CLOSED: 'UND_ERR_CLOSED，连接已关闭',
+  UND_ERR_CONNECT_TIMEOUT: 'UND_ERR_CONNECT_TIMEOUT，建立连接超时',
+  UND_ERR_HEADERS_TIMEOUT: 'UND_ERR_HEADERS_TIMEOUT，等待响应超时',
+  UND_ERR_BODY_TIMEOUT: 'UND_ERR_BODY_TIMEOUT，读取响应超时',
+  UND_ERR_RESPONSE_STATUS_CODE: 'UND_ERR_RESPONSE_STATUS_CODE，网关返回异常状态',
+};
 
-const ACTION_SYSTEM_PROMPT = `你是 ViewPhone 的手机 UI 自动化操作器。你会收到一张当前手机截图和完整测试目标。
+const ACTION_SYSTEM_PROMPT = `你是 ViewPhone 的手机 UI 探索测试操作器。你会收到当前截图、完整测试目标、已探索进度和当前页面的可见文字。
 
 你的工作方式与 ai-phone 的 VLM Runner 一致：每一轮只看当前截图，决定唯一一个下一步动作；动作执行后系统会重新截图，再让你判断下一步。不要试图一次输出整段脚本。
 
+## 探索原则
+只有目标是开放式任务（例如“对当前页面进行系统测试”“找出可能的 bug”“全面检查这个页面”）时，才按下面的探索原则执行；如果目标已经给出明确操作步骤，严格按目标步骤执行，不要额外扩展。
+
+1. 探索不是把当前页面翻看一遍。每到新页面，先盘点页面上的可交互入口：顶部导航与 Tab、按钮、卡片、列表项、输入框、筛选/排序、悬浮按钮、更多/···、底部操作栏，再逐个点进去看。
+2. 优先进入二级页面、弹窗和详情页；进入后检查内容是否完整、是否与入口一致，然后用 back 返回上一页继续下一个入口。
+3. 同一页面连续滚动不要超过 2 次。本页还有没点过的主要入口时，下一步必须点击入口，而不是继续滚动。
+4. “查看更多/加载更多/展开”、顶部 Tab、筛选、搜索、开关、加减数量、优惠券与弹窗都属于必测项；页面底部和首屏下方容易漏掉，要专门覆盖。
+5. 主动找异常：空状态、加载失败、占位文案（如“XXX”“商品副标题”）、错别字或乱码、价格/数量/单位不一致、图片与商品标题不匹配、按钮点击无响应、重复点击无变化、返回后状态丢失、重复提交。
+6. 一个页面覆盖完主要模块后再离开；离开前确认没有明显未探索的入口。已经覆盖的页面用 back 返回后继续找没点过的入口。
+7. 不要连续重复同一个动作；上一个动作没有让页面变化时，必须换目标或换策略，不能原地重复。
+
+## 输出
 必须只输出一个 JSON 对象，不要 Markdown，不要解释 JSON 之外的内容：
 {
-  "thought": "对当前页面的简短观察，以及这一步如何推进目标",
+  "thought": "对当前页面的简短观察，说明本轮已经覆盖了什么、还差什么，以及这一步如何推进探索",
   "expected": "这个动作完成后，下一张截图应出现的可验证结果",
   "action": {
     "type": "click | long_press | swipe | scroll | input | back | home | wait | finished | assert_fail",
@@ -23,14 +55,14 @@ const ACTION_SYSTEM_PROMPT = `你是 ViewPhone 的手机 UI 自动化操作器�
 - scroll: {"type":"scroll","description":"向下浏览商品","direction":"down","x":500,"y":500}。direction 指想看的内容方向：down 看下方，up 看上方，right 看右侧，left 看左侧。
 - input: {"type":"input","description":"输入牛奶","text":"牛奶"}
 - back/home/wait: {"type":"wait","description":"等待页面加载","seconds":2}
-- finished: {"type":"finished","description":"购物车页面已出现刚加入的商品"}
+- finished: {"type":"finished","description":"已覆盖首页全部入口、3 个详情页和 2 个弹窗，未发现阻断问题"}
 - assert_fail: {"type":"assert_fail","description":"多次尝试后仍未找到购物车入口"}
 
 坐标 x/y、fromX/fromY/toX/toY 一律使用相对整张截图的 0-1000 整数坐标。不要返回设备像素坐标。点击目标不明确时先滚动或返回查看，绝不能盲点。
 
 输入文字前，先确认输入框已在当前截图里获得焦点；如果尚未点击输入框，本轮只输出 click。
 wait 的 seconds 必须在 1-30 之间。
-只有当前截图已经满足测试目标的可见证据时，才能输出 finished。
+只有当前截图已经满足测试目标的可见证据时，才能输出 finished；开放式探索目标下，finished 的 description 必须概括已覆盖的页面和入口，不能只写“已完成”。
 任务确实无法继续或预期结果明确不满足时，输出 assert_fail，并在 description 中说明期望、当前状态和尝试过的动作。
 expected 必须描述动作后应能直接看到的页面、选中状态、文字或控件变化，不能只写“操作成功”。
 `;
@@ -152,6 +184,7 @@ export function getVisionModelConfig(env = process.env) {
     apiUrl,
     missing,
     timeoutMs: clampTimeout(env.VISION_MODEL_TIMEOUT_MS),
+    retryDelaysMs: parseRetryDelays(env.VISION_MODEL_RETRY_DELAYS_MS),
   };
 }
 
@@ -170,6 +203,7 @@ export async function decideVisionAction({
   history,
   screenshot,
   historyRounds = 10,
+  progress,
   config = getVisionModelConfig(),
 }) {
   return decideVisionActionWithJsonRetry({
@@ -177,6 +211,7 @@ export async function decideVisionAction({
     history,
     screenshot,
     historyRounds,
+    progress,
     config,
   });
 }
@@ -509,14 +544,16 @@ async function decideVisionActionWithJsonRetry({
   history,
   screenshot,
   historyRounds,
+  progress,
   config,
 }) {
   requireConfigured(config);
   const basePrompt = [
     '请分析当前截图并决定唯一一个下一步动作。',
     `完整测试目标：\n${goal}`,
+    formatExplorationBlock(progress),
     `已执行过程：\n${formatHistory(history, historyRounds)}`,
-  ];
+  ].filter(Boolean);
   let lastError;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const prompt = [
@@ -716,81 +753,97 @@ export function describeCurrentScreen(screenshot) {
 }
 
 async function requestVisionText({ prompt, screenshot, screenshots, config, maxTokens, systemPrompt }) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
   const images = Array.isArray(screenshots) && screenshots.length > 0
     ? screenshots
     : screenshot
       ? [{ screenshot, label: 'current' }]
       : [];
-  try {
-    const response = config.provider === 'anthropic'
-      ? await requestAnthropic({ prompt, images, config, maxTokens, systemPrompt, signal: controller.signal })
-      : await requestOpenAiCompatible({ prompt, images, config, maxTokens, systemPrompt, signal: controller.signal });
-    if (!response.ok) {
-      const detail = await response.text().catch(() => '');
-      throw visionError(
-        `视觉模型请求失败（HTTP ${response.status}）：${redact(detail).slice(0, 500)}`,
-        'VISION_MODEL_REQUEST_FAILED',
-        502,
-      );
+  const retryDelays = requestRetryDelays(config);
+  let attempts = 0;
+  let failure;
+  for (;;) {
+    attempts += 1;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+    try {
+      const response = config.provider === 'anthropic'
+        ? await requestAnthropic({ prompt, images, config, maxTokens, systemPrompt, signal: controller.signal })
+        : await requestOpenAiCompatible({ prompt, images, config, maxTokens, systemPrompt, signal: controller.signal });
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        throw visionRequestError(
+          `视觉模型请求失败（HTTP ${response.status}）：${redact(detail).slice(0, 500)}`,
+          'VISION_MODEL_REQUEST_FAILED',
+          502,
+          { httpStatus: response.status },
+        );
+      }
+      const payload = await response.json();
+      const text = config.provider === 'anthropic' ? anthropicText(payload) : openAiText(payload);
+      if (!text) {
+        // Content types and stop reasons are safe diagnostics; never log image
+        // data, prompts, credentials, or model reasoning blocks.
+        console.warn('[视觉响应摘要]', {
+          provider: config.provider,
+          status: response.status,
+          contentTypes: Array.isArray(payload?.content)
+            ? payload.content.map((block) => block?.type || 'unknown')
+            : [],
+          stopReason: payload?.stop_reason || payload?.choices?.[0]?.finish_reason,
+        });
+        const emptyDetail = emptyResponseDetail(payload);
+        throw visionRequestError(
+          `视觉模型返回了空结果${emptyDetail ? `（${emptyDetail}）` : ''}`,
+          'VISION_MODEL_EMPTY',
+          502,
+        );
+      }
+      return text;
+    } catch (error) {
+      failure = normalizeVisionRequestFailure(error, config);
+      const delayMs = retryDelays[attempts - 1];
+      if (delayMs === undefined || !isRetryableVisionRequestFailure(failure)) break;
+      // Diagnostics only: never log prompts, screenshots or credentials.
+      console.warn(`[视觉] 第 ${attempts} 次视觉模型请求失败（${failure.code}），${Math.round(delayMs)}ms 后自动重试`);
+      await pauseMs(delayMs);
+    } finally {
+      clearTimeout(timer);
     }
-    const payload = await response.json();
-    const text = config.provider === 'anthropic' ? anthropicText(payload) : openAiText(payload);
-    if (!text) {
-      // Content types and stop reasons are safe diagnostics; never log image
-      // data, prompts, credentials, or model reasoning blocks.
-      console.warn('[视觉响应摘要]', {
-        provider: config.provider,
-        status: response.status,
-        contentTypes: Array.isArray(payload?.content)
-          ? payload.content.map((block) => block?.type || 'unknown')
-          : [],
-        stopReason: payload?.stop_reason || payload?.choices?.[0]?.finish_reason,
-      });
-      const emptyDetail = emptyResponseDetail(payload);
-      throw visionError(
-        `视觉模型返回了空结果${emptyDetail ? `（${emptyDetail}）` : ''}`,
-        'VISION_MODEL_EMPTY',
-        502,
-      );
-    }
-    return text;
-  } catch (error) {
-    if (error?.name === 'AbortError') {
-      throw visionError(`视觉模型在 ${Math.round(config.timeoutMs / 1_000)} 秒内没有响应`, 'VISION_MODEL_TIMEOUT', 504);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
   }
+  throw withVisionRetryNote(failure, attempts);
 }
 
 export async function assertVisionModelConnection(config = getVisionModelConfig()) {
   requireConfigured(config);
-  const response = await fetch(config.apiUrl, {
-    method: 'POST',
-    headers: config.provider === 'anthropic'
-      ? {
-          'Content-Type': 'application/json',
-          'anthropic-version': '2023-06-01',
-          'x-api-key': config.apiKey,
-          Authorization: `Bearer ${config.apiKey}`,
-        }
-      : { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
-    signal: AbortSignal.timeout(Math.min(config.timeoutMs, 30_000)),
-    body: JSON.stringify(config.provider === 'anthropic'
-      ? {
-          model: config.model,
-          max_tokens: 16,
-          messages: [{ role: 'user', content: 'Reply with OK.' }],
-        }
-      : {
-          model: config.model,
-          max_tokens: 16,
-          messages: [{ role: 'user', content: 'Reply with OK.' }],
-        }),
-  });
+  const timeoutMs = Math.min(config.timeoutMs, 30_000);
+  let response;
+  try {
+    response = await fetch(config.apiUrl, {
+      method: 'POST',
+      headers: config.provider === 'anthropic'
+        ? {
+            'Content-Type': 'application/json',
+            'anthropic-version': '2023-06-01',
+            'x-api-key': config.apiKey,
+            Authorization: `Bearer ${config.apiKey}`,
+          }
+        : { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+      signal: AbortSignal.timeout(timeoutMs),
+      body: JSON.stringify(config.provider === 'anthropic'
+        ? {
+            model: config.model,
+            max_tokens: 16,
+            messages: [{ role: 'user', content: 'Reply with OK.' }],
+          }
+        : {
+            model: config.model,
+            max_tokens: 16,
+            messages: [{ role: 'user', content: 'Reply with OK.' }],
+          }),
+    });
+  } catch (error) {
+    throw normalizeVisionRequestFailure(error, { timeoutMs });
+  }
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
     throw visionError(
@@ -1131,6 +1184,60 @@ function defaultDescription(action) {
   })[action.type];
 }
 
+/**
+ * Turn the live exploration state into prompt lines. Without this the model
+ * only saw the last few rounds, so it kept scrolling one list to the bottom
+ * instead of entering detail pages and covering the page module by module.
+ */
+function formatExplorationBlock(progress) {
+  if (!progress || typeof progress !== 'object') return '';
+  const number = (value) => Math.max(0, Math.round(Number(value) || 0));
+  const lines = [];
+  const title = cleanText(progress.currentPageTitle, 40);
+  if (title) {
+    lines.push(
+      `当前页面：${title}（本页已执行 ${number(progress.currentPageActions)} 个动作，其中点击/输入 ${number(progress.currentPageInteractions)} 次）`,
+    );
+  }
+  lines.push(
+    `已探索：${number(progress.pageCount)} 个页面/弹窗 · ${number(progress.interactionCount)} 次点击/输入 · ${number(progress.scrollCount)} 次滚动`,
+  );
+  const visited = (Array.isArray(progress.pages) ? progress.pages : [])
+    .slice(-8)
+    .map((page) => `${cleanText(page?.title, 24) || '未命名页面'}（${number(page?.actions)} 个动作）`)
+    .join('、');
+  if (visited) lines.push(`已覆盖页面：${visited}`);
+  if (number(progress.maxSteps) > 0) {
+    lines.push(`步数预算：已用 ${Math.max(0, number(progress.maxSteps) - number(progress.remainingSteps))} / ${number(progress.maxSteps)} 步`);
+  }
+  const streak = number(progress.scrollStreak);
+  if (streak >= 2) {
+    lines.push(`注意：当前页面已连续滚动 ${streak} 次。本轮不要再滚动，必须点击尚未探索的入口；需要回到上一层时用 back。`);
+  } else if (number(progress.pageCount) <= 1 && number(progress.interactionCount) === 0) {
+    lines.push('注意：还没有进入任何二级页面或弹窗。本轮优先点击一个主要入口进去验证，再用 back 返回继续。');
+  } else if (number(progress.pageCount) <= 1) {
+    lines.push('注意：目前只覆盖了 1 个页面。本轮需要换一个入口继续探索（详情页、弹窗、Tab、筛选或搜索）。');
+  }
+  const visible = progress.visible && typeof progress.visible === 'object' ? progress.visible : undefined;
+  if (visible) {
+    const groups = [
+      ['top', '顶部'],
+      ['middle', '中部'],
+      ['bottom', '底部'],
+    ]
+      .map(([key, label]) => {
+        const items = (Array.isArray(visible[key]) ? visible[key] : [])
+          .map((item) => cleanText(item, 24))
+          .filter(Boolean)
+          .slice(0, 6);
+        return items.length ? `${label}：${items.join('、')}` : '';
+      })
+      .filter(Boolean);
+    if (groups.length) lines.push(`当前页面可见文字（可作为点击目标参考）：\n${groups.join('\n')}`);
+  }
+  return `【探索进度与线索】\n${lines.join('\n')}`;
+}
+
 function formatHistory(history = [], maximumRounds = 10) {
   if (!Array.isArray(history) || history.length === 0) return '尚未执行动作。';
   const limit = Math.max(1, Math.min(100, Number(maximumRounds) || 10));
@@ -1247,6 +1354,97 @@ function clampInteger(value, minimum, maximum, fallback) {
 function clampTimeout(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 10_000 ? Math.min(number, 300_000) : DEFAULT_TIMEOUT_MS;
+}
+
+/**
+ * Comma separated milliseconds, e.g. "800,2000". An empty value disables the
+ * automatic retries; at most MAX_REQUEST_RETRIES delays are honoured.
+ */
+function parseRetryDelays(value) {
+  if (value === undefined || value === null) return DEFAULT_REQUEST_RETRY_DELAYS_MS;
+  const source = String(value).trim();
+  if (!source) return [];
+  return source
+    .split(',')
+    .map((item) => Number(item.trim()))
+    .filter((number) => Number.isFinite(number) && number >= 0)
+    .slice(0, MAX_REQUEST_RETRIES)
+    .map((number) => Math.round(Math.min(number, MAX_REQUEST_RETRY_DELAY_MS)));
+}
+
+function requestRetryDelays(config) {
+  return Array.isArray(config?.retryDelaysMs) ? config.retryDelaysMs : DEFAULT_REQUEST_RETRY_DELAYS_MS;
+}
+
+function pauseMs(ms) {
+  if (!(ms > 0)) return Promise.resolve();
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * Turn raw transport failures (undici throws a bare `TypeError: fetch failed`
+ * with the real reason hidden in `cause`) into errors a tester can act on.
+ */
+function normalizeVisionRequestFailure(error, config) {
+  if (error?.code && error?.statusCode) return error;
+  if (error?.name === 'AbortError') {
+    return visionError(
+      `视觉模型在 ${Math.round((config?.timeoutMs ?? DEFAULT_TIMEOUT_MS) / 1_000)} 秒内没有响应`,
+      'VISION_MODEL_TIMEOUT',
+      504,
+    );
+  }
+  if (error instanceof SyntaxError) {
+    return visionError('视觉模型返回了无法解析的响应内容', 'VISION_MODEL_INVALID_RESPONSE', 502);
+  }
+  return visionError(
+    `视觉模型网络请求失败（${networkFailureLabel(networkFailureCode(error))}）`,
+    'VISION_MODEL_NETWORK',
+    502,
+  );
+}
+
+function networkFailureCode(error) {
+  const seen = new Set();
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const code = typeof current.code === 'string' ? current.code : '';
+    if (code) return code;
+    current = current.cause;
+  }
+  return '';
+}
+
+function networkFailureLabel(code) {
+  return NETWORK_FAILURE_LABELS[code] || code || '无法连接模型网关';
+}
+
+function isRetryableVisionRequestFailure(failure) {
+  if (failure?.code === 'VISION_MODEL_NETWORK' || failure?.code === 'VISION_MODEL_INVALID_RESPONSE') {
+    return true;
+  }
+  if (failure?.code !== 'VISION_MODEL_REQUEST_FAILED') return false;
+  const status = Number(failure.httpStatus);
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+function withVisionRetryNote(failure, attempts) {
+  const retries = Math.max(0, attempts - 1);
+  if (!failure || retries === 0) return failure;
+  return visionRequestError(
+    `${failure.message}；已自动重试 ${retries} 次仍失败，请检查网络或模型网关后重试`,
+    failure.code,
+    failure.statusCode,
+    { httpStatus: failure.httpStatus },
+  );
+}
+
+function visionRequestError(message, code, statusCode, extra = {}) {
+  return Object.assign(visionError(message, code, statusCode), extra);
 }
 
 function cleanText(value, maximum) {

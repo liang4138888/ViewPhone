@@ -23,6 +23,9 @@ const artifactRoot = config.testRunsRoot
   : join(root, '.artifacts/test-runs');
 const runs = new Map();
 const activeDevices = new Set();
+// Explicit stop requests. Kept outside the run object so it never leaks into
+// the record the UI polls or the archive.
+const stopRequests = new Set();
 const RUN_ID = /^[a-f0-9-]{20,40}$/i;
 const MAX_INSTRUCTIONS = 40;
 const MAX_INSTRUCTION_LENGTH = 4_000;
@@ -228,6 +231,38 @@ export function getTestRun(runId) {
   return run ? publicRun(run) : undefined;
 }
 
+/**
+ * Ask a running exploration to stop. The loop checks between steps and right
+ * before executing the decided action, so a 60-step run cannot keep tapping a
+ * real phone after the operator presses stop.
+ */
+export function requestTestRunStop(runId) {
+  const run = runs.get(runId);
+  if (!run) {
+    throw Object.assign(new Error('测试记录不存在或服务已重启'), {
+      statusCode: 404,
+      code: 'TEST_RUN_NOT_FOUND',
+    });
+  }
+  if (!['queued', 'running'].includes(run.status)) {
+    return { stopped: false, status: run.status };
+  }
+  stopRequests.add(run.id);
+  return { stopped: true, status: run.status };
+}
+
+function stopRequested(run) {
+  return stopRequests.has(run.id);
+}
+
+function stopError(run) {
+  const passed = run.steps.filter((step) => step.status === 'passed').length;
+  return Object.assign(
+    new Error(`测试已被手动停止（已执行 ${passed} 步）`),
+    { statusCode: 409, code: 'TEST_RUN_STOPPED' },
+  );
+}
+
 export async function archiveCompletedTestRun(runId) {
   const run = runs.get(runId);
   if (!run) {
@@ -270,6 +305,7 @@ async function executeRun(run, device) {
   let currentInspection;
   try {
     for (const step of run.steps) {
+      if (stopRequested(run)) throw stopError(run);
       step.status = 'running';
       step.startedAt = new Date().toISOString();
       markStage(step, 'preparing', '准备执行动作，正在唤醒手机');
@@ -307,8 +343,12 @@ async function executeRun(run, device) {
   } catch (error) {
     run.status = 'failed';
     run.error = error instanceof Error ? error.message : String(error);
+    if (error?.code === 'TEST_RUN_STOPPED') {
+      run.termination = 'stopped';
+    }
     for (const step of run.steps) if (step.status === 'pending') step.status = 'skipped';
   } finally {
+    stopRequests.delete(run.id);
     run.finishedAt = new Date().toISOString();
     await checkpointTestRun(run);
     await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => {});
@@ -443,8 +483,10 @@ async function executeVisionRun(run, device) {
   let lastTap;
   let priorInspection;
   let previousVisionAction;
+  const exploration = createExplorationState();
   try {
     for (let index = 1; index <= config.visionMaxSteps; index += 1) {
+      if (stopRequested(run)) throw stopError(run);
       const step = createVisionStep(index);
       run.steps.push(step);
       step.status = 'running';
@@ -461,14 +503,26 @@ async function executeVisionRun(run, device) {
           markStage(step, 'readingScreen', '正在读取当前手机画面用于首轮决策');
           before = await captureInspection(device, adapter, temporaryDirectory);
         }
+        const page = observeVisionExploration(exploration, before.layout, previousVisionAction);
+        step.pageKey = page.page.key;
+        step.pageTitle = page.page.title;
+        run.exploration = explorationSnapshot(exploration);
         markStage(step, 'thinking', '视觉模型正在查看当前画面并决定下一步');
         const action = await decideVisionAction({
           goal: run.flow,
           history: visionHistory(run.steps.slice(0, -1)),
           screenshot: before,
           historyRounds: run.historyRounds,
+          progress: buildExplorationProgress(exploration, {
+            remainingSteps: config.visionMaxSteps - index + 1,
+            maxSteps: config.visionMaxSteps,
+          }),
           config: getVisionModelConfig(),
         });
+        noteVisionAction(exploration, action);
+        run.exploration = explorationSnapshot(exploration);
+        // A stop during the model call must not turn into a real tap.
+        if (stopRequested(run)) throw stopError(run);
         applyVisionActionToStep(step, action);
         if (action.type === 'finished') {
           markStage(step, 'acting', '视觉模型申请完成，正在检查最终页面');
@@ -602,9 +656,14 @@ async function executeVisionRun(run, device) {
   } catch (error) {
     run.status = 'failed';
     run.error = error instanceof Error ? error.message : String(error);
+    if (error?.code === 'TEST_RUN_STOPPED') {
+      run.termination = 'stopped';
+    }
     for (const step of run.steps) if (step.status === 'pending') step.status = 'skipped';
   } finally {
+    stopRequests.delete(run.id);
     run.finishedAt = new Date().toISOString();
+    run.exploration = explorationSnapshot(exploration);
     run.quality = buildVisionQuality(run);
     await checkpointTestRun(run);
     await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => {});
@@ -651,7 +710,7 @@ export function buildVisionQuality(run) {
       recovered: run.status === 'completed' && Boolean(run.verdict?.passed),
     });
   }
-  if (run?.status === 'failed' && run.error && issues.length === 0) {
+  if (run?.status === 'failed' && run.error && issues.length === 0 && run.termination !== 'stopped') {
     const failedStep = [...(run.steps || [])].reverse().find((step) => step.status === 'failed');
     issues.push({
       stepIndex: failedStep?.index || Math.max(1, run.steps?.length || 1),
@@ -672,8 +731,14 @@ export function buildVisionQuality(run) {
     .sort((first, second) => second[1] - first[1])
     .map(([category, count]) => `${issueCategoryName(category)} ${count} 个`)
     .join('、');
+  const stopped = run?.termination === 'stopped';
   let summary;
-  if (issues.length > 0) {
+  if (stopped) {
+    const passed = (run.steps || []).filter((step) => step.status === 'passed').length;
+    summary = issues.length > 0
+      ? `测试已手动停止，已执行 ${passed} 个动作，期间记录 ${issues.length} 个问题。`
+      : `测试已手动停止，已完成 ${passed} 个动作。`;
+  } else if (issues.length > 0) {
     summary = run?.status === 'completed'
       ? `目标已完成，但发现 ${issues.length} 个过程问题：${categorySummary}。`
       : `测试未完成，发现 ${issues.length} 个问题：${categorySummary}。`;
@@ -688,7 +753,7 @@ export function buildVisionQuality(run) {
     summary += `另有 ${unverifiedCount} 个步骤未能完成独立校验。`;
   }
   return {
-    status: issues.length > 0 ? 'issues' : unverifiedCount > 0 ? 'unverified' : 'passed',
+    status: issues.length > 0 ? 'issues' : (unverifiedCount > 0 || stopped) ? 'unverified' : 'passed',
     issueCount: issues.length,
     summary,
     issues,
@@ -842,6 +907,164 @@ function visionHistory(steps) {
     passed: step.status === 'passed',
     status: step.status,
   }));
+}
+
+const EXPLORATION_INTERACTION_TYPES = new Set(['click', 'long_press', 'input']);
+const EXPLORATION_NAVIGATION_TYPES = new Set(['click', 'long_press', 'input', 'back', 'home', 'wait']);
+// Status bar noise (clock, battery, carrier, signal) must not become a page
+// title or a click hint. OCR often merges the clock with the battery glyph,
+// so the time pattern allows a prefix and trailing digits.
+const SYSTEM_UI_TEXT = new RegExp([
+  String.raw`^\D{0,4}\d{1,2}[:：]\d{2}\d*$`,
+  String.raw`^\d{1,3}%$`,
+  String.raw`^(5g|4g|3g|lte|volte|hd|wifi|wlan)$`,
+  String.raw`^(中国移动|中国联通|中国电信|无服务|仅限紧急呼叫)$`,
+].join('|'), 'i');
+const STATUS_BAR_BAND = 0.045;
+
+/**
+ * Track what the run has actually covered: pages/弹窗 entered, real
+ * interactions (点击/输入), scroll behaviour and visible text. The model only
+ * sees a short history window, so without this state it keeps scrolling the
+ * first list and never enters detail pages.
+ */
+export function createExplorationState() {
+  return {
+    pages: [],
+    current: undefined,
+    currentView: undefined,
+    actionCount: 0,
+    interactionCount: 0,
+    scrollCount: 0,
+    scrollStreak: 0,
+  };
+}
+
+export function describePageView(layout) {
+  const height = Number(layout?.height) || 1;
+  const nodes = (layout?.nodes || [])
+    .filter((node) => node?.enabled !== false && node?.bounds)
+    .map((node) => ({ node, text: displayText(node) }))
+    .filter(({ node, text }) => (
+      text.length >= 2
+      && !SYSTEM_UI_TEXT.test(normalizeText(text))
+      && centerOf(node.bounds).y / height > STATUS_BAR_BAND
+    ));
+  const groups = { top: [], middle: [], bottom: [] };
+  const texts = [];
+  const seen = new Set();
+  for (const { node, text } of nodes) {
+    const key = normalizeText(text);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    texts.push(text);
+    const ratio = centerOf(node.bounds).y / height;
+    const area = ratio < 0.3 ? 'top' : ratio < 0.7 ? 'middle' : 'bottom';
+    if (groups[area].length < 8) groups[area].push(text);
+    if (texts.length >= 40) break;
+  }
+  // App title bars render the page name in the largest text of the header
+  // band; falling back to the first text would label the page with the address
+  // chip or a promo line instead.
+  const header = nodes
+    .filter(({ node, text }) => (
+      centerOf(node.bounds).y / height < 0.2 && text.length <= 20
+    ))
+    .sort((first, second) => (
+      (second.node.bounds.bottom - second.node.bounds.top)
+      - (first.node.bounds.bottom - first.node.bounds.top)
+      || first.node.bounds.top - second.node.bounds.top
+    ))[0];
+  return {
+    title: (header?.text || texts[0] || '未识别页面').slice(0, 20),
+    texts,
+    groups,
+  };
+}
+
+export function observeVisionExploration(state, layout, action) {
+  const view = describePageView(layout);
+  const navigation = EXPLORATION_NAVIGATION_TYPES.has(action?.type || '');
+  const overlap = state.current ? textOverlap(state.current.texts, view.texts) : 0;
+  const changed = !state.current || (navigation && overlap < 0.5);
+  if (changed) {
+    // Going back to a page already explored must not inflate the coverage
+    // count. A scrolled list returns with the same content window, so match on
+    // the text overlap as well as the (possibly scrolled) page title.
+    const known = state.pages.find((page) => (
+      page.title === view.title || textOverlap(page.texts, view.texts) >= 0.5
+    ));
+    state.current = known || {
+      key: `p${state.pages.length + 1}`,
+      title: view.title,
+      actions: 0,
+      interactions: 0,
+      texts: view.texts,
+    };
+    if (!known) state.pages.push(state.current);
+    state.scrollStreak = 0;
+  }
+  state.current.texts = view.texts;
+  state.currentView = view;
+  return { page: state.current, changed };
+}
+
+export function noteVisionAction(state, action) {
+  const type = action?.type || '';
+  if (!state.current || type === 'finished' || type === 'assert_fail') return;
+  state.actionCount += 1;
+  state.current.actions += 1;
+  if (EXPLORATION_INTERACTION_TYPES.has(type)) {
+    state.interactionCount += 1;
+    state.current.interactions += 1;
+    state.scrollStreak = 0;
+  } else if (type === 'scroll' || type === 'swipe') {
+    state.scrollCount += 1;
+    state.scrollStreak += 1;
+  } else {
+    state.scrollStreak = 0;
+  }
+}
+
+export function explorationSnapshot(state) {
+  return {
+    pageCount: state.pages.length,
+    interactionCount: state.interactionCount,
+    scrollCount: state.scrollCount,
+    actionCount: state.actionCount,
+    pages: state.pages.map((page) => ({
+      key: page.key,
+      title: page.title,
+      actions: page.actions,
+      interactions: page.interactions,
+    })),
+  };
+}
+
+export function buildExplorationProgress(state, { remainingSteps = 0, maxSteps = 0 } = {}) {
+  const snapshot = explorationSnapshot(state);
+  return {
+    currentPageTitle: state.current?.title,
+    currentPageActions: state.current?.actions || 0,
+    currentPageInteractions: state.current?.interactions || 0,
+    pageCount: snapshot.pageCount,
+    interactionCount: snapshot.interactionCount,
+    scrollCount: snapshot.scrollCount,
+    scrollStreak: state.scrollStreak,
+    remainingSteps: Math.max(0, Math.round(Number(remainingSteps) || 0)),
+    maxSteps: Math.max(0, Math.round(Number(maxSteps) || 0)),
+    pages: snapshot.pages,
+    visible: state.currentView?.groups,
+  };
+}
+
+function textOverlap(left = [], right = []) {
+  if (!left.length || !right.length) return 0;
+  const first = new Set(left.map(normalizeText));
+  const second = new Set(right.map(normalizeText));
+  let shared = 0;
+  for (const item of first) if (second.has(item)) shared += 1;
+  return shared / Math.max(1, Math.max(first.size, second.size));
 }
 
 async function wakeForVision(adapter, device) {

@@ -13,6 +13,7 @@ import {
   previewTestFlow,
   shareArchivedTestRun,
   startTestRun,
+  stopTestRun,
 } from '../lib/api';
 import { Icon } from './Icon';
 import { ScreenshotViewer } from './ScreenshotViewer';
@@ -39,6 +40,7 @@ export function SemanticTestPanel({ open, devices, onRunningChange, onClose, emb
   const [runs, setRuns] = useState<TestRun[]>([]);
   const [activeRunId, setActiveRunId] = useState<string>();
   const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [startError, setStartError] = useState<string>();
   const [previewImage, setPreviewImage] = useState<{ url: string; title: string }>();
   const [archiveError, setArchiveError] = useState<string>();
@@ -225,6 +227,20 @@ export function SemanticTestPanel({ open, devices, onRunningChange, onClose, emb
       );
     }
     setStarting(false);
+  };
+
+  const stopActiveRuns = async () => {
+    if (!active || stopping) return;
+    setStopping(true);
+    setStartError(undefined);
+    try {
+      await Promise.all(activeRuns.map((testRun) => stopTestRun(testRun.id)));
+      setActionNotice('已发送停止请求，当前动作执行完毕后结束');
+    } catch (error) {
+      setStartError(`停止失败：${messageOf(error)}`);
+    } finally {
+      setStopping(false);
+    }
   };
 
   const createShare = async () => {
@@ -440,7 +456,7 @@ export function SemanticTestPanel({ open, devices, onRunningChange, onClose, emb
               <div>
                 <span className="eyebrow">LIVE EXECUTION</span>
                 <strong>{selectedRun
-                  ? `${selectedRun.deviceName} · ${selectedRun.engine === 'vision' ? '视觉逐步执行' : '离线步骤'} · ${selectedRun.steps.length} 个动作${selectedRun.quality?.issueCount ? ` · ${selectedRun.quality.issueCount} 个问题` : ''}`
+                  ? `${selectedRun.deviceName} · ${selectedRun.engine === 'vision' ? '视觉逐步执行' : '离线步骤'} · ${selectedRun.steps.length} 个动作${selectedRun.exploration?.pageCount ? ` · 覆盖 ${selectedRun.exploration.pageCount} 个页面/${selectedRun.exploration.interactionCount} 次交互` : ''}${selectedRun.quality?.issueCount ? ` · ${selectedRun.quality.issueCount} 个问题` : ''}`
                   : engine === 'vision' ? '视觉模型将从当前画面开始决策' : `${preview.length} 个步骤已识别`}</strong>
               </div>
               {selectedRun && <RunStatus run={selectedRun} />}
@@ -488,6 +504,16 @@ export function SemanticTestPanel({ open, devices, onRunningChange, onClose, emb
                   ? `开始 ${selectedDevices.length} 台设备测试`
                   : '开始语义测试'}
           </button>
+          {active && (
+            <button
+              type="button"
+              className="test-secondary test-stop"
+              onClick={() => void stopActiveRuns()}
+              disabled={stopping}
+            >
+              {stopping ? '正在停止' : '停止测试'}
+            </button>
+          )}
         </footer>
         {previewImage && (
           <ScreenshotViewer
@@ -666,7 +692,9 @@ function RunStatus({ run }: { run: TestRun }) {
           : `执行 ${passed}/${run.steps.length}`
         : run.status === 'completed'
           ? run.quality?.issueCount ? `目标完成 · ${run.quality.issueCount} 个问题` : '验收通过'
-          : run.termination === 'max_steps' ? '达到步数上限' : '执行失败'}
+          : run.termination === 'stopped'
+            ? '已手动停止'
+            : run.termination === 'max_steps' ? '达到步数上限' : '执行失败'}
     </span>
   );
 }

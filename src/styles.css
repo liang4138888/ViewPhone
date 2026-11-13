@@ -3447,6 +3447,8 @@ svg {
 .test-drawer-footer strong { color: var(--muted); font-size: 10px; font-weight: 500; }
 .test-drawer-footer span { color: var(--faint); font-family: var(--mono); font-size: 8px; }
 .test-start { min-width: 130px; height: 34px; }
+.test-stop { height: 34px; margin-left: 8px; }
+.test-stop:disabled { opacity: 0.45; cursor: not-allowed; }
 .test-start .spinner { width: 9px; height: 9px; border-color: #182012; border-right-color: transparent; }
 .test-start:disabled { opacity: 0.45; cursor: not-allowed; }
 

@@ -510,7 +510,7 @@ function RecordDetail({
           <span className="eyebrow">{comparison ? 'MUTUAL DEVICE REVIEW' : 'STEP BY STEP'}</span>
           <h2>{comparison ? '多设备页面差异' : '逐步执行过程'}</h2>
         </div>
-        <span>{comparison ? `${comparison.progress?.total || comparison.pairs?.length || 0} 组设备互比` : `${run.steps.length} 个动作`}</span>
+        <span>{comparison ? `${comparison.progress?.total || comparison.pairs?.length || 0} 组设备互比` : `${run.steps.length} 个动作${run.exploration?.pageCount ? ` · 覆盖 ${run.exploration.pageCount} 个页面/${run.exploration.interactionCount} 次交互` : ''}`}</span>
       </section>
       {comparison ? (
         <ComparisonEvidence comparison={comparison} onPreview={onPreview} compactOverview />
